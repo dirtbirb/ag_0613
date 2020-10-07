@@ -52,6 +52,17 @@ class TCPowerRFGenrator(object):
                 self.stop()
 
     def __com_loop(self):
+        ''' Serial communication loop
+        - Sends commands from self.tx_queue or a heartbeat message if no
+        command shows up in tx_queue for over one second.
+        - Places responces in self.rx_queue. Response includes data, if
+        expected, or just an acknowledgement message if no data expected.
+        - tx_queue messages are tuples:
+            (bytestring to send, bool whether data is expected)
+        - rx_queue messages are tuples:
+            (command id, response content)
+        - Continues until self.running == False. '''
+
         # Connect
         try:
             ser = serial.Serial(self.port, self.baud, timeout=self.timeout)
@@ -120,13 +131,15 @@ class TCPowerRFGenrator(object):
 
     # Internal methods -----------------------------------------------------
     def from_bytes(self, v):
+        ''' Helper function. Returns an int from bytes. '''
         return int.from_bytes(v, self.BYTEORDER)
 
     def to_bytes(self, v, l):
+        ''' Helper function. Returns bytestring from int and length. '''
         return v.to_bytes(l, self.BYTEORDER)
 
     def assemble_cmd(self, cmd_id, parm1=0, parm2=0):
-        ''' Internal function to format commands '''
+        ''' Internal function to format commands for sending. '''
         msg = self.CMD_HEAD + self.CMD_ADDR     # Header + address
         msg += self.to_bytes(cmd_id, 2)         # Command ID
         msg += self.to_bytes(parm1, 2)          # Param 1
@@ -135,8 +148,15 @@ class TCPowerRFGenrator(object):
         return msg
 
     def send_cmd(self, cmd_id, parm1=0x00, parm2=0x00, read=False):
+        ''' Format and send a command, then wait for and return response.
+        Returns data, if expected; otherwise returns bool representing
+        whether command was acknowledged successfully.'''
+
+        # Assemble and send command
         msg = self.assemble_cmd(cmd_id, parm1, parm2)
         self.tx_queue.put((msg, read))
+
+        # Read receive queue until a response matches the correct id
         id = b'\x00'
         while self.from_bytes(id) != cmd_id:
             try:
@@ -145,30 +165,33 @@ class TCPowerRFGenrator(object):
                 print("ERROR -- RF: Failed to get response, command below.")
                 print("\t", msg)
                 return False
-        if not read:
-            ret = val == self.ACK
-        else:
+
+        # Return data if requested, or whether ACK signal was okay otherwise
+        if read:
             ret = val
+        else:
+            ret = val == self.ACK
         return ret
 
     # Misc control ---------------------------------------------------------
     def stop(self):
-        ''' Set flag to close com loop '''
+        ''' Release control, then set flag to close com loop. '''
         self.releaseControl()
         time.sleep(2)
         self.running = False
 
     def ping(self):
+        ''' Returns true if unit will acknowledge commands. '''
         return self.send_cmd(0x4250)
 
     def requestControl(self):
-        ''' Returns True if control was granted, False otherwise '''
+        ''' Returns True if control was granted, False otherwise. '''
         status = self.send_cmd(0x4243, 0x5555, read=True)
         return self.from_bytes(status) == 1
 
     def releaseControl(self):
-        ''' Returns True on success. Unit will automatically return control
-            if heartbeat stops for 2 seconds. '''
+        ''' Returns True on success. Even if this fails, unit will
+        automatically return control if heartbeat stops for 2 seconds. '''
         status = self.send_cmd(0x4243, read=True)
         return self.from_bytes(status) == 0
 
@@ -182,16 +205,20 @@ class TCPowerRFGenrator(object):
 
     # On/Off ---------------------------------------------------------------
     def rf(self, on=False):
+        ''' Turns rf power on/off, returns success either way. '''
         return self.send_cmd(0x4252, 0x5555 if on else 0x0000)
 
     def turnOn(self):
+        ''' Alias for rf '''
         return self.rf(True)
 
     def turnOff(self):
+        ''' Alias for rf '''
         return self.rf(False)
 
     # Power ----------------------------------------------------------------
     def readPower(self):
+        ''' Returns tuple of current (forward, refected, load) power. '''
         ret = self.send_cmd(0x4750, read=True)
         fwd = self.from_bytes(ret[0:2]) / 10
         rev = self.from_bytes(ret[2:4]) / 10
@@ -199,24 +226,31 @@ class TCPowerRFGenrator(object):
         return fwd, rev, load
 
     def readForwardPower(self):
+        ''' Alias of readPower that only returns forward power as a string. '''
         return self.FMT_FLOAT.format(self.readPower()[0])
 
     def readForwardPowerSetpoint(self):
+        ''' Returns current forward power setpoint, not actual power. '''
         setpt = self.from_bytes(self.send_cmd(0x474C, read=True)) / 10
         return self.FMT_FLOAT.format(setpt)
 
     def readReflectedPower(self):
+        ''' Alias of readPower that only returns refl power as a string. '''
         return self.FMT_FLOAT.format(self.readPower()[1])
 
     def setForwardPower(self, setpoint):
+        ''' Set forward power setpoint.
+        Enforces min/max power limits from init. '''
         setpoint = min(max(setpoint, self.min_power), self.max_power)
         return self.send_cmd(0x5341, setpoint)
 
     def setForwardPowerLimit(self, limit):
+        ''' Set forward power limit in hardware. '''
         limit = min(max(limit, self.min_power), self.max_power)
         return self.send_cmd(0x5355, 1, limit)
 
     def setReflectedPowerLimit(self, limit):
+        ''' Set reflected power limit in hardware. '''
         return self.send_cmd(0x5355, 2, limit)
 
 
